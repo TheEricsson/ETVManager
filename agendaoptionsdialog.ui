@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>AgendaOptionsDialog</class>
+ <widget class="QDialog" name="AgendaOptionsDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>400</width>
+    <height>182</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Gehe zu...</string>
+  </property>
+  <widget class="QWidget" name="verticalLayoutWidget">
+   <property name="geometry">
+    <rect>
+     <x>10</x>
+     <y>10</y>
+     <width>381</width>
+     <height>170</height>
+    </rect>
+   </property>
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <item>
+     <widget class="QPushButton" name="editAgenda">
+      <property name="text">
+       <string>Tagesordnung editieren</string>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QPushButton" name="generateProtocol">
+      <property name="text">
+       <string>Protokollgenerator starten</string>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QPushButton" name="editProtocolTranscript">
+      <property name="text">
+       <string>Protokollabschrift ansehen/editieren</string>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QPushButton" name="generateDocuments">
+      <property name="text">
+       <string>Dokumente ausgeben</string>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QPushButton" name="abortDialog">
+      <property name="text">
+       <string>Abbrechen</string>
+      </property>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

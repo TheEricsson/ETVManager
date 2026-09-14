@@ -1,0 +1,1246 @@
+#include "generatorWidget.h"
+#include "ui_GeneratorWidget.h"
+#include <QTextDocument>
+#include <QTextEdit>
+#include <QTextDocumentWriter>
+#include <QPrinter>
+#include <QFileDialog>
+#include <QTextFrame>
+#include <QMessageBox>
+#include <stringreplacer.h>
+#include "wizarddialogbox.h"
+//#include "redmineimpl.h"
+#include <QSettings>
+#include <QSqlQuery>
+#include "global.h"
+
+GeneratorWidget::GeneratorWidget(QWidget *parent) :
+    QWidget(parent),
+    ui(new Ui::GeneratorWidget)
+{
+    ui->setupUi(this);
+}
+
+GeneratorWidget::~GeneratorWidget()
+{
+    delete ui;
+}
+
+void GeneratorWidget::refreshOnSelected()
+{
+  if (!this->isEnabled())
+  {
+    QMessageBox::information(this, "Fehler", "Alle Einstellungen deaktiviert.\nLegen Sie zunächst ein Wirtschaftsjahr und eine Eigentümerversammlung an");
+    return;
+  }
+}
+
+void GeneratorWidget::setParameter (settingsType aParameter, QString aSetting)
+{
+  switch (aParameter)
+  {
+    case eDbConnectionName:
+      mUser = aSetting;
+      break;
+  }
+}
+
+void GeneratorWidget::on_doOdt_clicked()
+{
+  QString path = QApplication::applicationDirPath();
+  path.append("/cfg/config.ini");
+
+  QSettings settings (path, QSettings::IniFormat);
+
+  QString storedFilePath = settings.value("settings/defaultDir", "").toString();
+
+  //fallback
+  if ("" == storedFilePath)
+  {
+    storedFilePath = QDir::home().path();
+  }
+
+  //tagesordnung generieren
+  if (Qt::Checked == ui->agenda->checkState())
+  {
+    storedFilePath = generateAgendaAsOdt (storedFilePath);
+  }
+}
+
+void GeneratorWidget::setTableFormat (QTextTableFormat* pTableFormat)
+{
+  if (0 != pTableFormat)
+  {
+    QBrush blackBrush(Qt::SolidPattern);
+    pTableFormat->setBorderBrush(blackBrush);
+    pTableFormat->setBorder(5);
+    pTableFormat->setCellSpacing(0);
+    pTableFormat->setCellPadding(5);
+    pTableFormat->setHeaderRowCount(0);
+    pTableFormat->setBorderStyle(QTextFrameFormat::BorderStyle_Groove);
+    pTableFormat->setWidth(QTextLength(QTextLength::PercentageLength, 100));
+  }
+}
+
+QString GeneratorWidget::generateProcurationAsPdf (const QString &rFilePath)
+{
+  QSqlQuery query (QSqlDatabase::database(mUser));
+
+  //get years
+  query.prepare("SELECT * FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvNum");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  QString text;
+  QTextDocument* doc = new QTextDocument ();
+  QTextCursor cursor (doc);
+  QTextTableFormat tableFormat;
+  setTableFormat (&tableFormat);
+
+  while (query.next())
+  {
+    //insert header text
+    cursor.movePosition(QTextCursor::End);
+
+    cursor.insertHtml (StringReplacer::getInstance()->getReplacementString("%vollmachtHeader%"));
+    cursor.insertHtml ("<br>");
+
+    cursor.insertTable (3, 1, tableFormat);
+    cursor.insertHtml("<b>V O L L M A C H T</b>");
+    cursor.movePosition(QTextCursor::NextRow);
+    cursor.insertText("Eigentümerversammlung ");
+    cursor.insertText(query.value(2).toString());
+    cursor.insertText("/");
+    cursor.insertText(query.value(1).toString());
+    cursor.insertText(" der WEG ");
+
+    QSqlQuery queryPropertyName (QSqlDatabase::database(mUser));
+    //get current property name
+    queryPropertyName.prepare("SELECT * FROM Objekt WHERE obj_id = :id");
+    queryPropertyName.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+    queryPropertyName.exec();
+
+    if (queryPropertyName.next())
+    {
+      cursor.insertText(queryPropertyName.value(1).toString());
+    }
+
+    cursor.insertHtml("<br>");
+    cursor.insertText("Datum: ");
+    cursor.insertText(query.value(3).toString());
+    cursor.insertHtml("<br>");
+    cursor.insertText("Uhrzeit: ");
+    cursor.insertText(query.value(4).toString());
+
+    cursor.movePosition(QTextCursor::NextRow);
+    cursor.insertText (StringReplacer::getInstance()->getReplacementString("%vollmachtBevollmaechtigter%"));
+    cursor.movePosition(QTextCursor::End);
+
+    cursor.insertHtml ("<br>");
+  }
+
+  //insert agenda items
+  query.prepare("SELECT top_id, top_header, top_descr, top_vorschlag, top_vorschlag2, top_vorschlag3, beschlussArt FROM Tagesordnungspunkte WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvnr");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvnr", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  while (query.next())
+  {
+    QString topNumber (query.value(0).toString());
+    QString topHeader (query.value(1).toString());
+    //QString topDescription (query.value(2).toString());
+    QString topSuggestion (query.value(3).toString());
+    QString topSuggestion2 (query.value(4).toString());
+    QString topSuggestion3 (query.value(5).toString());
+    int type (query.value(6).toInt());
+
+    QTextDocument htmlConverter;
+
+    htmlConverter.setHtml(topSuggestion);
+    QString topSuggestionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion2);
+    QString topSuggestion2Plain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion3);
+    QString topSuggestion3Plain = htmlConverter.toPlainText();
+
+    //count needed rows for table
+    int neededRows = 8;
+    if ("" == topSuggestionPlain)
+      neededRows--;
+    if ("" == topSuggestion2Plain)
+      neededRows--;
+    if ("" == topSuggestion3Plain)
+      neededRows--;
+
+    cursor.movePosition(QTextCursor::End);
+    tableFormat.setHeaderRowCount(neededRows);
+    cursor.insertTable (neededRows, 1, tableFormat);
+
+    cursor.insertHtml("TOP ");
+    cursor.insertHtml(topNumber);
+    cursor.insertHtml(": ");
+    cursor.insertHtml(topHeader);
+
+    if ("" != topSuggestionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml("[ ] Weisung gemäß Beschlussvorschlag");
+    }
+
+    if ("" != topSuggestion2Plain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml("[ ] Weisung gemäß Beschlussvorschlag Alternative 1");
+    }
+
+    if ("" != topSuggestion3Plain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml("[ ] Weisung gemäß Beschlussvorschlag Alternative 2");
+    }
+
+    cursor.movePosition(QTextCursor::NextRow);
+
+    if (2 != type)
+      cursor.insertHtml("[ ] Weisung gemäß folgendem Wortlaut:");
+    else
+      cursor.insertHtml("Anmerkung:<br>");
+
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertHtml ("<br>");
+  }
+
+  cursor.insertTable (4, 1, tableFormat);
+  cursor.insertHtml ("Datum:");
+  cursor.movePosition(QTextCursor::NextRow);
+  cursor.insertHtml ("Wohnung Nr.:");
+  cursor.movePosition(QTextCursor::NextRow);
+  cursor.insertHtml ("Eigentümername (Druckbuchstaben):");
+  cursor.movePosition(QTextCursor::NextRow);
+  cursor.insertHtml ("Unterschrift:");
+
+  QPrinter printer(QPrinter::HighResolution);
+  printer.setPageSize(QPageSize::A4);
+  //printer.setPageSize(QPrinter::A4);
+  printer.setOutputFormat(QPrinter::PdfFormat);
+
+  QFileDialog fileDialog;
+  fileDialog.setDirectory(rFilePath);
+  QString file = fileDialog.getSaveFileName(this, tr("Speichern als PDF"), "/tmp/Vollmacht.pdf", tr("PDF Datei (*.pdf)"));
+
+  printer.setOutputFileName(file);
+
+  doc->print(&printer);
+  delete doc;
+
+  return QFileInfo(file).path();
+}
+
+QString GeneratorWidget::generateAgendaAsPdf (const QString &rFilePath)
+{
+  QSqlQuery query (QSqlDatabase::database(mUser));
+
+  //get years
+  query.prepare("SELECT * FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvNum");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  QString text;
+  QTextDocument* doc = new QTextDocument ();
+  QTextCursor cursor (doc);
+  QTextTableFormat tableFormat;
+  setTableFormat (&tableFormat);
+
+  if (query.next())
+  {
+    //insert header text
+    cursor.movePosition(QTextCursor::End);
+    tableFormat.setHeaderRowCount(2);
+    cursor.insertTable (2, 1, tableFormat);
+    cursor.insertHtml("<b>T A G E S O R D N U N G</b>");
+    cursor.movePosition(QTextCursor::NextRow);
+    cursor.insertHtml("Eigentümerversammlung ");
+    cursor.insertHtml(query.value(2).toString());
+    cursor.insertHtml("/");
+    cursor.insertHtml(query.value(1).toString());
+    cursor.insertHtml(" der WEG ");
+
+    QSqlQuery queryPropertyName (QSqlDatabase::database(mUser));
+    //get current property name
+    queryPropertyName.prepare("SELECT * FROM Objekt WHERE obj_id = :id");
+    queryPropertyName.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+    queryPropertyName.exec();
+
+    while (queryPropertyName.next())
+    {
+      cursor.insertHtml(queryPropertyName.value(1).toString());
+    }
+
+    cursor.insertHtml("<br><b>Ort: </b><br>");
+    cursor.insertHtml(query.value(5).toString());
+    cursor.insertHtml("<br><b>Datum: </b><br>");
+    cursor.insertText(query.value(3).toString());
+    cursor.insertHtml("<br><b>Uhrzeit: </b><br>");
+    cursor.insertText(query.value(4).toTime().toString());
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertHtml("<br>");
+  }
+
+  //insert agenda items
+  query.prepare("SELECT top_id, top_header, top_descr, top_vorschlag, top_vorschlag2, top_vorschlag3 FROM Tagesordnungspunkte WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvnr");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvnr", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  while (query.next())
+  {
+    QString topNumber (query.value(0).toString());
+    QString topHeader (query.value(1).toString());
+    QString topDescription (query.value(2).toString());
+    QString topSuggestion (query.value(3).toString());
+    QString topSuggestion2 (query.value(4).toString());
+    QString topSuggestion3 (query.value(5).toString());
+
+    QTextDocument htmlConverter;
+
+    htmlConverter.setHtml(topDescription);
+    QString topDescriptionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion);
+    QString topSuggestionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion2);
+    QString topSuggestion2Plain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion3);
+    QString topSuggestion3Plain = htmlConverter.toPlainText();
+
+    //count needed rows for table
+    int neededRows = 5;
+    if ("" == topDescriptionPlain)
+      --neededRows;
+    if ("" == topSuggestionPlain)
+      --neededRows;
+    if ("" == topSuggestion2Plain)
+      --neededRows;
+    if ("" == topSuggestion3Plain)
+      --neededRows;
+
+    htmlConverter.setHtml(topHeader);
+    qDebug () << htmlConverter.toPlainText();
+
+    qDebug () << "neededRows: " << neededRows;
+
+    cursor.movePosition(QTextCursor::End);
+
+    tableFormat.setHeaderRowCount(neededRows);
+
+    cursor.insertTable (neededRows, 1, tableFormat);
+
+    cursor.insertText("TOP ");
+    cursor.insertHtml(topNumber);
+    cursor.insertText(": ");
+    cursor.insertHtml(topHeader);
+
+    if ("" != topDescriptionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml(topDescription);
+    }
+
+    if ("" != topSuggestionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml("<b>Beschlussvorschlag:</b><br>");
+      cursor.insertHtml(topSuggestion);
+    }
+
+    if ("" != topSuggestion2Plain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml("<b>Beschlussvorschlag Alternative 1:</b><br>");
+      cursor.insertHtml(topSuggestion2);
+    }
+
+    if ("" != topSuggestion3Plain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml("<b>Beschlussvorschlag Alternative 2:</b><br>");
+      cursor.insertHtml(topSuggestion3);
+    }
+
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertHtml("<br>");
+  }
+
+  QPrinter printer(QPrinter::HighResolution);
+  //printer.setPageSize(QPrinter::A4);
+  printer.setPageSize(QPageSize::A4);
+  printer.setOutputFormat(QPrinter::PdfFormat);
+
+  QFileDialog fileDialog;
+  fileDialog.setDirectory(rFilePath);
+  QString file = fileDialog.getSaveFileName(this, tr("Speichern als PDF"), "/tmp/Tagesordnung.pdf", tr("PDF Datei (*.pdf)"));
+
+  printer.setOutputFileName(file);
+
+  doc->print(&printer);
+
+  delete doc;
+
+  return QFileInfo(file).path();
+}
+
+QString GeneratorWidget::generateAgendaAsOdt (const QString &rFilePath)
+{
+  QSqlQuery query (QSqlDatabase::database(mUser));
+
+  //get years
+  query.prepare("SELECT * FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvNum");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  QString text;
+  QTextDocument* doc = new QTextDocument ();
+  QTextCursor cursor (doc);
+  QTextTableFormat tableFormat;
+  setTableFormat (&tableFormat);
+
+  if (query.next())
+  {
+      //insert header text
+      cursor.movePosition(QTextCursor::End);
+      tableFormat.setHeaderRowCount(2);
+      cursor.insertTable (2, 1, tableFormat);
+      cursor.insertText("T A G E S O R D N U N G");
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertText("Eigentümerversammlung ");
+      cursor.insertText(query.value(2).toString());
+      cursor.insertText("/");
+      cursor.insertText(query.value(1).toString());
+      cursor.insertText(" der WEG ");
+
+      QSqlQuery queryPropertyName (QSqlDatabase::database(mUser));
+      //get current property name
+      queryPropertyName.prepare("SELECT * FROM Objekt WHERE obj_id = :id");
+      queryPropertyName.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+      queryPropertyName.exec();
+
+      while (queryPropertyName.next())
+      {
+        cursor.insertText(queryPropertyName.value(1).toString());
+      }
+
+      cursor.insertText("\nOrt: \n");
+      cursor.insertText(query.value(5).toString());
+      cursor.insertText("\nDatum: \n");
+      cursor.insertText(query.value(3).toString());
+      cursor.insertText("\nUhrzeit: \n");
+      cursor.insertText(query.value(4).toTime().toString());
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertText("\n");
+  }
+
+  //insert agenda items
+  query.prepare("SELECT top_id, top_header, top_descr, top_vorschlag, top_vorschlag2, top_vorschlag3 FROM Tagesordnungspunkte WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvnr");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvnr", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  while (query.next())
+  {
+    QString topNumber (query.value(0).toString());
+    QString topHeader (query.value(1).toString());
+    QString topDescription (query.value(2).toString());
+    QString topSuggestion (query.value(3).toString());
+    QString topSuggestion2 (query.value(4).toString());
+    QString topSuggestion3 (query.value(5).toString());
+
+    QTextDocument htmlConverter;
+
+    htmlConverter.setHtml(topDescription);
+    QString topDescriptionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion);
+    QString topSuggestionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion2);
+    QString topSuggestion2Plain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(topSuggestion3);
+    QString topSuggestion3Plain = htmlConverter.toPlainText();
+
+    //count needed rows for table
+    int neededRows = 5;
+    if ("" == topDescriptionPlain)
+      --neededRows;
+    if ("" == topSuggestionPlain)
+      --neededRows;
+    if ("" == topSuggestion2Plain)
+      --neededRows;
+    if ("" == topSuggestion3Plain)
+      --neededRows;
+
+    htmlConverter.setHtml(topHeader);
+    qDebug () << htmlConverter.toPlainText();
+
+    qDebug () << "neededRows: " << neededRows;
+
+    cursor.movePosition(QTextCursor::End);
+
+    tableFormat.setHeaderRowCount(neededRows);
+
+    cursor.insertTable (neededRows, 1, tableFormat);
+
+    cursor.insertText("TOP ");
+    cursor.insertText(topNumber);
+    cursor.insertText(": ");
+    cursor.insertText(topHeader);
+
+    if ("" != topDescriptionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertText(topDescription);
+    }
+
+    if ("" != topSuggestionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertText("Beschlussvorschlag:\n");
+      cursor.insertText(topSuggestion);
+    }
+
+    if ("" != topSuggestion2Plain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertText("Beschlussvorschlag Alternative 1:\n");
+      cursor.insertText(topSuggestion2);
+    }
+
+    if ("" != topSuggestion3Plain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertText("Beschlussvorschlag Alternative 2:\n");
+      cursor.insertText(topSuggestion3);
+    }
+
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText("\n");
+  }
+
+  QFileDialog fileDialog;
+  fileDialog.setDirectory(rFilePath);
+  QString file = fileDialog.getSaveFileName(this, tr("Speichern als ODT"), "/tmp/Tagesordnung.odt", tr("ODT Datei (*.odt)"));
+
+  QTextDocumentWriter writer(file);
+  writer.write(doc);
+
+  delete doc;
+
+  return QFileInfo(file).path();
+}
+
+QString GeneratorWidget::generateReportTemplateAsPdf (const QString &rFilePath)
+{
+  QSqlQuery query (QSqlDatabase::database(mUser));
+
+  //get years
+  query.prepare("SELECT * FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvNum");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  QString text;
+  QTextDocument* doc = new QTextDocument ();
+  QTextCursor cursor (doc);
+
+  QTextTableFormat tableFormat;
+  setTableFormat (&tableFormat);
+  //tableFormat.setPageBreakPolicy (QTextFormat::PageBreak_AlwaysAfter);
+
+  if (query.next())
+  {
+      //insert header text
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertTable (2, 1, tableFormat);
+
+      cursor.insertHtml("<b>P R O T O K O L L</b>");
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertText("Der WEG ");
+
+      QSqlQuery query2 (QSqlDatabase::database(mUser));
+      //get current property name
+      query2.prepare("SELECT * FROM Objekt WHERE obj_id = :id");
+      query2.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+      query2.exec();
+
+      while (query2.next())
+      {
+          cursor.insertText(query2.value(1).toString());
+      }
+
+      cursor.insertHtml("<br><b>Ort: </b>");
+      cursor.insertHtml(query.value(5).toString());
+      cursor.insertHtml("<br><b>Datum: </b>");
+      cursor.insertText(query.value(3).toString());
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertHtml("<br>");
+
+      //get report cover page
+      query2.clear();
+      query2.prepare("SELECT Protokollvorlage FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr =:year AND etv_nr =:etvNum");
+      query2.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+      query2.bindValue(":year", Global::getInstance()->getCurrentYear());
+      query2.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+      query2.exec();
+
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertHtml("<br>");
+
+      while (query2.next())
+        cursor.insertHtml(replaceCoverPageTagsByUnderscore (query2.value(0).toString()));
+
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertHtml("<br>");
+  }
+
+  //insert agenda items
+  query.prepare("SELECT top_id, top_header, top_descr, top_vorschlag, top_vorschlag2, top_vorschlag3, LeerzeilenProtokoll, beschlussArt FROM Tagesordnungspunkte WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvnr");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvnr", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  cursor.movePosition(QTextCursor::End);
+  tableFormat.setPageBreakPolicy (QTextFormat::PageBreak_AlwaysBefore);
+  cursor.insertTable(1,1,tableFormat);
+  cursor.insertHtml("<b>B E S C H L U E S S E</b>");
+  cursor.movePosition(QTextCursor::End);
+  cursor.insertHtml("<br><br>");
+
+  while (query.next())
+  {
+      QString descriptionText = query.value(2).toString ();
+      QString beschlussvorschlag = query.value(3).toString();
+      QString beschlussvorschlagAlt1 = query.value(4).toString();
+      QString beschlussvorschlagAlt2 = query.value(5).toString();
+      int beschlussArt = query.value(7).toInt();
+
+      QTextDocument htmlConverter;
+
+      htmlConverter.setHtml(beschlussvorschlag);
+      QString beschlussvorschlagPlain = htmlConverter.toPlainText();
+
+      htmlConverter.setHtml(beschlussvorschlagAlt1);
+      QString beschlussvorschlagAlt1Plain = htmlConverter.toPlainText();
+
+      htmlConverter.setHtml(beschlussvorschlagAlt2);
+      QString beschlussvorschlagAlt2Plain = htmlConverter.toPlainText();
+
+      htmlConverter.setHtml(descriptionText);
+      QString descriptionTextPlain = htmlConverter.toPlainText();
+
+      int spacerLines = query.value(6).toInt();
+
+      //count needed rows for table
+
+      int rowsVotingText = 0;
+
+      if (2 != beschlussArt)
+        rowsVotingText = 5;
+
+      int neededRows = 6 + spacerLines + rowsVotingText;
+      if ("" == beschlussvorschlagPlain)
+        neededRows--;
+      if ("" == beschlussvorschlagAlt1Plain)
+        neededRows--;
+      if ("" == beschlussvorschlagAlt2Plain)
+        neededRows--;
+      if ("" == descriptionTextPlain)
+        neededRows--;
+
+      cursor.movePosition(QTextCursor::End);
+      tableFormat.setPageBreakPolicy(QTextFormat::PageBreak_Auto);
+      tableFormat.setHeaderRowCount(neededRows);
+      cursor.insertTable (neededRows, 1, tableFormat);
+      cursor.insertHtml("TOP ");
+      cursor.insertHtml(query.value(0).toString());
+      cursor.insertText(": ");
+      cursor.insertHtml(query.value(1).toString());
+
+      if ("" != descriptionTextPlain)
+      {
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertHtml(query.value(2).toString());
+      }
+
+      if ("" != beschlussvorschlagPlain)
+      {
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertHtml("<b>Beschlussvorschlag:</b><br>");
+        cursor.insertHtml(beschlussvorschlag);
+      }
+
+      if ("" != beschlussvorschlagAlt1Plain)
+      {
+          cursor.movePosition(QTextCursor::NextRow);
+          cursor.insertHtml("<b>Beschlussvorschlag Alternative 1:</b><br>");
+          cursor.insertHtml(beschlussvorschlagAlt1);
+      }
+      if ("" != beschlussvorschlagAlt2Plain)
+      {
+          cursor.movePosition(QTextCursor::NextRow);
+          cursor.insertHtml("<b>Beschlussvorschlag Alternative 2:</b><br>");
+          cursor.insertHtml(beschlussvorschlagAlt2);
+      }
+
+      cursor.movePosition(QTextCursor::NextRow);
+
+      if (2 != beschlussArt)
+        cursor.insertHtml("<b>Beschluss:</b>");
+      else
+        cursor.insertHtml("<b>Anmerkungen:</b>");
+
+      for (int i = 0; i < spacerLines; i++)
+        cursor.movePosition(QTextCursor::NextRow);
+
+      if (2 != beschlussArt)
+      {
+        cursor.insertHtml("<b>Abstimmung<b>");
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertText("Ja-Stimmen: ");
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertText("Nein-Stimmen: ");
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertText("Enthaltungen: ");
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertHtml("<b>Verkündung durch den Versammlungsleiter:<b>");
+      }
+
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertHtml("<br><br>");
+  }
+
+  cursor.insertText("Die Richtigkeit und Vollständigkeit des Protokolls wurde geprüft durch folgende zur Versammlung anwesende Personen:\n\n");
+  cursor.insertText("Unterschrift Miteigentümer 1: _______________________, Name in Druckbuchstaben: _______________________\n\n\n");
+  cursor.insertText("Unterschrift Miteigentümer 2: _______________________, Name in Druckbuchstaben: _______________________\n\n\n");
+  cursor.insertText("Unterschrift Miteigentümer 3: _______________________, Name in Druckbuchstaben: _______________________\n\n\n");
+  cursor.insertText("Unterschrift Versammlungsleiter: _______________________");
+
+  QPrinter printer(QPrinter::HighResolution);
+  //printer.setPageSize(QPrinter::A4);
+  printer.setPageSize(QPageSize::A4);
+  printer.setOutputFormat(QPrinter::PdfFormat);
+
+  QFileDialog fileDialog;
+  fileDialog.setDirectory(rFilePath);
+  QString file = fileDialog.getSaveFileName(this, tr("Speichern als PDF"), "/tmp/Protokollvorlage.pdf", tr("PDF Datei (*.pdf)"));
+
+  printer.setOutputFileName(file);
+  doc->print(&printer);
+  delete doc;
+
+  return QFileInfo(file).path();
+}
+
+QString GeneratorWidget::generateReportTranscriptAsPdf (const QString &rFilePath)
+{
+  QSqlQuery query (QSqlDatabase::database(mUser));
+
+  //get years
+  query.prepare("SELECT * FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvNum");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  QString text;
+  QTextDocument* doc = new QTextDocument ();
+  QTextCursor cursor (doc);
+
+  QTextTableFormat tableFormat;
+  setTableFormat (&tableFormat);
+
+  if (query.next())
+  {
+    //insert header text
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertTable (2, 1, tableFormat);
+
+    cursor.insertHtml("<b>P R O T O K O L L A B S C H R I F T</b>");
+    cursor.movePosition(QTextCursor::NextRow);
+    cursor.insertText("Der WEG ");
+
+    QSqlQuery query2 (QSqlDatabase::database(mUser));
+    //get current property name
+    query2.prepare("SELECT * FROM Objekt WHERE obj_id = :id");
+    query2.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+    query2.exec();
+
+    while (query2.next())
+    {
+        cursor.insertText(query2.value(1).toString());
+    }
+
+    cursor.insertHtml("<br><b>Ort: </b>");
+    cursor.insertHtml(query.value(5).toString());
+    cursor.insertHtml("<br><b>Datum: </b>");
+    cursor.insertText(query.value(3).toString());
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText("\n\n");
+
+    //get report cover page
+    query2.prepare("SELECT Protokollabschrift FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr =:year AND etv_nr =:etvNum");
+    query2.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+    query2.bindValue(":year", Global::getInstance()->getCurrentYear());
+    query2.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+    query2.exec();
+
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText("\n");
+
+    if (query2.next())
+      cursor.insertHtml(query2.value(0).toString());
+
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText("\n");
+  }
+
+  //insert agenda items
+  query.prepare("SELECT * FROM Beschluesse WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvnr");
+  query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+  query.bindValue(":year", Global::getInstance()->getCurrentYear());
+  query.bindValue(":etvnr", Global::getInstance()->getCurrentEtvNumber());
+  query.exec();
+
+  cursor.movePosition(QTextCursor::End);
+  tableFormat.setPageBreakPolicy (QTextFormat::PageBreak_AlwaysBefore);
+  cursor.insertTable(1,1,tableFormat);
+  cursor.insertHtml("<b>B E S C H L U E S S E</b>");
+  cursor.movePosition(QTextCursor::End);
+  cursor.insertText("\n\n");
+
+  while (query.next())
+  {
+    QString topId         = query.value(3).toString();
+    QString protokollId   = query.value(4).toString();
+    QString header        = query.value(5).toString();
+    QString description   = query.value(6).toString();
+    QString decission     = query.value(7).toString();
+    QString voteResult    = query.value(8).toString();
+    float yes             = query.value(9).toFloat();
+    float no              = query.value(10).toFloat();
+    float abstention      = query.value(11).toFloat();
+    int type              = query.value(12).toInt();
+
+    QTextDocument htmlConverter;
+
+    htmlConverter.setHtml(description);
+    QString descriptionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(decission);
+    QString decissionPlain = htmlConverter.toPlainText();
+
+    htmlConverter.setHtml(voteResult);
+    QString voteResultPlain = htmlConverter.toPlainText();
+
+    //count needed rows for table
+    int neededRows = 5;
+
+    qDebug () << "xxxxxxxxxxxxxxxxx";
+
+    htmlConverter.setHtml(header);
+    qDebug () << "header:" << htmlConverter.toPlainText();;
+
+    if ("" == descriptionPlain)
+    {
+      qDebug () << "descriptionPlain";
+      --neededRows;
+    }
+    if ("" == decissionPlain)
+    {
+      qDebug () << "decissionPlain";
+      --neededRows;
+    }
+    if ("" == voteResultPlain)
+    {
+      qDebug () << "voteResultPlain";
+      --neededRows;
+    }
+    if (0 == yes && 0 == no && 0 == abstention)
+    {
+      --neededRows;
+    }
+
+    qDebug () << "neededRows: " << neededRows;
+
+    cursor.movePosition(QTextCursor::End);
+    tableFormat.setPageBreakPolicy(QTextFormat::PageBreak_Auto);
+    tableFormat.setHeaderRowCount(neededRows);
+    cursor.insertTable (neededRows, 1, tableFormat);
+    cursor.insertHtml("TOP ");
+    cursor.insertHtml(topId);
+    cursor.insertText(": ");
+    cursor.insertHtml(header);
+
+    if ("" != descriptionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertHtml(description);
+    }
+
+    if ("" != decissionPlain)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      if (2 != type)
+      {
+        cursor.insertHtml("<b>Beschluss:</b><br>");
+      }
+      else
+      {
+        cursor.insertHtml("<b>Anmerkungen:</b><br>");
+      }
+      cursor.insertHtml(decission);
+    }
+
+    if ("" != voteResultPlain)
+    {
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertHtml(voteResult);
+    }
+
+    if (0 != yes || 0 != no || 0 != abstention)
+    {
+      cursor.movePosition(QTextCursor::NextRow);
+      cursor.insertTable (1, 3, tableFormat);
+      cursor.insertText(StringReplacer::getInstance()->getReplacementString("%StimmenJa%"));
+      cursor.insertText(": ");
+      cursor.insertHtml(QString::number(yes));
+
+      cursor.movePosition(QTextCursor::NextCell);
+      cursor.insertText(StringReplacer::getInstance()->getReplacementString("%StimmenNein%"));
+      cursor.insertText(": ");
+      cursor.insertHtml(QString::number(no));
+
+      cursor.movePosition(QTextCursor::NextCell);
+      cursor.insertText(StringReplacer::getInstance()->getReplacementString("%StimmenEnthaltung%"));
+      cursor.insertText(": ");
+      cursor.insertHtml(QString::number(abstention));
+      cursor.movePosition(QTextCursor::End);
+    }
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertHtml("<br>");
+  }
+
+  cursor.insertHtml("<br><br><br>");
+  cursor.insertHtml(StringReplacer::getInstance()->getReplacementString("%protokollabschriftUnterschriftenVorwort%"));
+  cursor.insertHtml("<br><br>");
+
+  QString wildcardSignature ("%Protokollunterschrift");
+  QString wildcardPerson ("%ProtokollunterschriftFkt");
+
+  int counter = 1;
+  bool stop = false;
+  QString retVal ("");
+
+  while (!stop)
+  {
+    QString temp1;
+    temp1.append(wildcardSignature);
+    temp1.append(QString::number(counter));
+    temp1.append("%");
+
+    QString temp2;
+    temp2.append(wildcardPerson);
+    temp2.append(QString::number(counter));
+    temp2.append("%");
+
+    retVal = StringReplacer::getInstance()->getReplacementString(temp1);
+
+    if (retVal == "")
+      stop = true;
+    else
+    {
+      cursor.insertText(retVal);
+      cursor.insertText (" (");
+    }
+
+    retVal = StringReplacer::getInstance()->getReplacementString(temp2);
+
+    if(retVal == "")
+      stop = true;
+    else
+    {
+      cursor.insertText(retVal);
+      cursor.insertText(")");
+      cursor.insertHtml("<br>");
+    }
+
+    counter++;
+  }
+
+  QPrinter printer(QPrinter::HighResolution);
+  //printer.setPageSize(QPrinter::A4);
+  printer.setPageSize(QPageSize::A4);
+  printer.setOutputFormat(QPrinter::PdfFormat);
+
+  QFileDialog fileDialog;
+  fileDialog.setDirectory(rFilePath);
+  QString file = fileDialog.getSaveFileName(this, tr("Speichern als PDF"), "/tmp/Protokollabschrift.pdf", tr("PDF Datei (*.pdf)"));
+
+  printer.setOutputFileName(file);
+  doc->print(&printer);
+  delete doc;
+
+  return QFileInfo(file).path();
+}
+
+QString GeneratorWidget::generateDecissionLibraryAsPdf (const QString &rFilePath)
+{
+  WizardDialogBox dialog (this, 0, eSimpleDialog);
+  dialog.setTitle (QString("Beschlusssammlung Startnummer"));
+
+  QString dialogText (StringReplacer::getInstance()->getReplacementString("%beschlusssammlungStartNummer%"));
+  dialog.setDialogText(dialogText);
+
+  int startNumber = 0;
+  if (QDialog::Accepted == dialog.exec())
+  {
+    QString value = dialog.getResult();
+    startNumber = value.toInt();
+
+    QString text ("");
+    QTextDocument* doc = new QTextDocument ();
+    QTextCursor cursor (doc);
+
+    //insert agenda items
+    QSqlQuery query (QSqlDatabase::database(mUser));
+    query.prepare("SELECT * FROM Beschluesse WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvnr AND beschlussArt <= 1");
+    query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+    query.bindValue(":year", Global::getInstance()->getCurrentYear());
+    query.bindValue(":etvnr", Global::getInstance()->getCurrentEtvNumber());
+    query.exec();
+
+    while (query.next())
+    {
+      QString header                = query.value(5).toString();
+      QString description           = query.value(6).toString();
+      QString decission             = query.value(7).toString();
+      QString voteResult            = query.value(8).toString();
+      int voteType                  = query.value(12).toInt();
+      QString vermerke              = query.value(13).toString();
+      QString gerichtsentscheidung  = query.value(14).toString();
+      bool plusBeschreibung         = query.value(15).toBool();
+
+      QTextDocument htmlConverter;
+
+      htmlConverter.setHtml(description);
+      QString descriptionPlain = htmlConverter.toPlainText();
+
+      htmlConverter.setHtml(decission);
+      QString decissionPlain = htmlConverter.toPlainText();
+
+      htmlConverter.setHtml(voteResult);
+      QString voteResultPlain = htmlConverter.toPlainText();
+
+      if ("" != decissionPlain && 3 != voteType)
+      {
+        QTextTableFormat tableFormat;
+        setTableFormat (&tableFormat);
+
+        int neededRows = 8;
+
+        tableFormat.setHeaderRowCount(neededRows);
+
+        tableFormat.setPageBreakPolicy(QTextFormat::PageBreak_Auto);
+        //tableFormat.setBorder(0);
+        cursor.insertTable (neededRows, 1, tableFormat);
+        cursor.insertText(StringReplacer::getInstance()->getReplacementString("%laufendeNummerBeschlusssammlung%"));
+        cursor.insertText(": ");
+        cursor.insertText(QString::number(startNumber));
+        cursor.movePosition(QTextCursor::NextRow);
+        QString headerHtml ("<b>");
+        headerHtml.append(header);
+        headerHtml.append("</b>");
+        cursor.insertHtml(headerHtml);
+        cursor.movePosition(QTextCursor::NextRow);
+
+        if (plusBeschreibung && descriptionPlain != "")
+        {
+          cursor.insertHtml(description);
+          cursor.movePosition(QTextCursor::NextRow);
+        }
+
+        cursor.insertHtml("<b>Beschlussformulierung:</b><br>");
+        cursor.insertHtml(decission);
+
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertHtml("<b>Vermerke:</b><br>");
+        cursor.insertHtml(vermerke);
+
+        cursor.movePosition(QTextCursor::NextRow);
+
+        QString voteTypeString ("");
+        if (0 == voteType)
+          voteTypeString = StringReplacer::getInstance()->getReplacementString("%beschlussTypVersammlung%");
+        else if (1 == voteType)
+          voteTypeString = StringReplacer::getInstance()->getReplacementString("%beschlussTypSchriftlich%");
+
+        cursor.insertHtml("<b>Beschlussart:</b><br>");
+        cursor.insertText(voteTypeString);
+
+        cursor.movePosition(QTextCursor::NextRow);
+        cursor.insertHtml ("<b>Gerichtsentscheidung:</b><br>");
+        cursor.insertHtml(gerichtsentscheidung);
+
+        cursor.movePosition(QTextCursor::NextRow);
+
+        //get date of etv
+        QSqlQuery query2 (QSqlDatabase::database(mUser));
+        query2.prepare("SELECT obj_id, wi_jahr, etv_nr, etv_datum, etv_uhrzeit, etv_ort FROM Eigentuemerversammlungen WHERE obj_id = :id AND wi_jahr = :year AND etv_nr = :etvNum");
+        query2.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+        query2.bindValue(":year", Global::getInstance()->getCurrentYear());
+        query2.bindValue(":etvNum", Global::getInstance()->getCurrentEtvNumber());
+        query2.exec();
+
+        QString etvDate ("");
+
+        if (query2.next())
+        {
+          etvDate = query2.value(3).toString();
+        }
+
+        cursor.insertHtml("<b>Datum:</b><br>");
+        cursor.insertText(etvDate);
+
+        cursor.movePosition (QTextCursor::NextRow);
+        cursor.insertHtml("<b>Unterschrift des Verwalters / des Vertretungsberechtigen: </b>");
+        cursor.insertHtml("<br>");
+
+        cursor.movePosition (QTextCursor::End);
+
+        cursor.insertHtml("<br>");
+        startNumber++;
+      }
+
+      //save file
+      QPrinter printer(QPrinter::HighResolution);
+      //printer.setPageSize(QPrinter::A4);
+      printer.setPageSize(QPageSize::A4);
+      printer.setOutputFormat(QPrinter::PdfFormat);
+
+      QFileDialog fileDialog;
+      fileDialog.setDirectory(rFilePath);
+      QString file = fileDialog.getSaveFileName(this, tr("Speichern als PDF"), "/tmp/Beschlusssammlung.pdf", tr("PDF Datei (*.pdf)"));
+
+      printer.setOutputFileName(file);
+      doc->print(&printer);
+      delete doc;
+
+      return QFileInfo(file).path();
+    }
+  }
+  return "";
+}
+
+QString GeneratorWidget::replaceCoverPageTagsByUnderscore (QString in)
+{
+  //check if the string may at all contain any wildcards
+  if (in.contains ("%"))
+  {
+    QSqlQuery query (QSqlDatabase::database(mUser));
+
+    //get years
+    query.prepare("SELECT obj_mea FROM Objekt WHERE obj_id = :id");
+    query.bindValue(":id", Global::getInstance()->getCurrentPropertyId());
+    query.exec();
+
+    while (query.next())
+    {
+      in.replace("%MEAgesamt%", query.value(0).toString());
+    }
+
+    in.replace("%DatumEinladungsschreiben%", "____________");
+    in.replace("%UhrzeitStartVersammlung%", "_________");
+    in.replace("%UhrzeitEndeVersammlung%", "_________");
+    in.replace("%BeschlussfaehigMarker%", "  ");
+    in.replace("%MEAAnwesend%", "_________");
+    in.replace("%Versammlungsleiter%", "_______________________");
+    in.replace("%VersammlungsleiterFktVerwalterMarker%", "  ");
+    in.replace("%VersammlungsleiterFktMitarbeiterMarker%", "  ");
+    in.replace("%VersammlungsleiterFktWEGMarker%", "  ");
+    in.replace("%Protokollfuehrung%", "_______________________");
+    in.replace("%ProtokollfuehrerFktChef%", "  ");
+    in.replace("%ProtokollfuehrerFktMitarbeiter%", "  ");
+    in.replace("%ProtokollfuehrerFktWEG%", "  ");
+    in.replace("%Abstimmungsregelung%", "_______________________");
+    in.replace("%Einladungsfrist%", "_________");
+  }
+  return in;
+}
+
+void GeneratorWidget::on_doPdf_clicked()
+{
+  QString path = QApplication::applicationDirPath();
+  path.append("/cfg/config.ini");
+
+  qDebug () << path;
+
+  QSettings settings (path, QSettings::IniFormat);
+
+  qDebug () << path;
+
+  QString storedFilePath = settings.value("settings/defaultDir", "").toString();
+
+  qDebug () << "Default Dir:";
+  qDebug () << storedFilePath;
+
+  //fallback
+  if ("" == storedFilePath)
+  {
+    storedFilePath = QDir::home().path();
+  }
+
+  //tagesordnung generieren
+  if (Qt::Checked == ui->agenda->checkState())
+  {
+    storedFilePath = generateAgendaAsPdf (storedFilePath);
+  }
+
+  if (Qt::Checked == ui->protokollvorlage->checkState())
+  {
+    storedFilePath = generateReportTemplateAsPdf (storedFilePath);
+  }
+
+  if (Qt::Checked == ui->procuration->checkState())
+  {
+    storedFilePath = generateProcurationAsPdf(storedFilePath);
+  }
+
+  if (Qt::Checked == ui->protokollabschrift->checkState())
+  {
+    storedFilePath = generateReportTranscriptAsPdf(storedFilePath);
+  }
+
+  if (Qt::Checked == ui->beschlusssammlung->checkState())
+  {
+    storedFilePath = generateDecissionLibraryAsPdf (storedFilePath);
+  }
+  if (Qt::Checked == ui->exportIssues->checkState())
+  {
+    ;
+  }
+}
